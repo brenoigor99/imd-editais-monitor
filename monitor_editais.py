@@ -2,9 +2,12 @@ import json
 import os
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # Arquivo JSON que guarda o histórico de editais já notificados
 HISTORICO_FILE = 'editais_vistos.json'
+BASE_URL = 'https://portal.imd.ufrn.br'
+URL_PORTAL = f'{BASE_URL}/portal/editais'
 
 def carregar_historico():
     """Carrega a lista de editais já vistos do arquivo JSON."""
@@ -38,7 +41,8 @@ def enviar_telegram(mensagem):
     payload = {
         'chat_id': chat_id,
         'text': mensagem,
-        'parse_mode': 'Markdown'
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': True
     }
 
     try:
@@ -50,14 +54,13 @@ def enviar_telegram(mensagem):
 
 def monitorar():
     editais_vistos = carregar_historico()
-    url_portal = 'https://portal.imd.ufrn.br/portal/editais' # URL dos editais do IMD
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
     try:
-        response = requests.get(url_portal, headers=headers, timeout=15)
+        response = requests.get(URL_PORTAL, headers=headers, timeout=15)
         response.raise_for_status()
     except Exception as e:
         print(f"Erro ao acessar o portal do IMD: {e}")
@@ -66,24 +69,27 @@ def monitorar():
     soup = BeautifulSoup(response.text, 'html.parser')
 
     # Busca as linhas/blocos de editais na página
-    # Ajusta-se às estruturas comuns de tabelas e listas do portal
     blocos_editais = soup.find_all(['tr', 'div', 'li'], class_=lambda c: c and any(x in c.lower() for x in ['edital', 'linha', 'item', 'card']))
 
-    # Caso não encontre por classe, busca linhas de tabela genéricas (tr) com links/conteúdo
     if not blocos_editais:
         blocos_editais = soup.find_all('tr')
 
     novos_editais_count = 0
 
     for bloco in blocos_editais:
-        # Extrai o texto limpo do edital
         texto_limpo = " ".join(bloco.get_text().split())
 
-        # Ignora blocos vazios, cabeçalhos curtos ou sem informação útil
-        if len(texto_limpo) < 20 or "Inscrições" not in texto_limpo and "Processo" not in texto_limpo:
+        # Ignora blocos vazios ou cabeçalhos
+        if len(texto_limpo) < 20 or ("Inscrições" not in texto_limpo and "Processo" not in texto_limpo):
             continue
 
-        # Identificador único para a comparação
+        # Tenta encontrar um link específico (`<a>`) dentro do bloco do edital
+        link_tag = bloco.find('a', href=True)
+        if link_tag and link_tag['href']:
+            link_edital = urljoin(BASE_URL, link_tag['href'])
+        else:
+            link_edital = URL_PORTAL  # Fallback para o portal geral se não achar link interno
+
         id_edital = texto_limpo
 
         # Se for um edital novo
@@ -91,12 +97,15 @@ def monitorar():
             novos_editais_count += 1
             editais_vistos.add(id_edital)
 
-            # Formata a mensagem limpa individual
-            mensagem = f"🚨 *NOVO EDITAL OU ATUALIZAÇÃO DETECTADA!*\n\n{texto_limpo}"
+            # Formata a mensagem com o link específico apontando direto para o edital
+            mensagem = (
+                f"🚨 *NOVO EDITAL OU ATUALIZAÇÃO DETECTADA!*\n\n"
+                f"{texto_limpo}\n\n"
+                f"🔗 [Acessar Página do Edital]({link_edital})"
+            )
             
-            # Envia a notificação imediatamente para este edital
             enviar_telegram(mensagem)
-            print(f"Novo edital enviado: {texto_limpo[:60]}...")
+            print(f"Novo edital enviado com link direto: {texto_limpo[:50]}...")
 
     if novos_editais_count > 0:
         salvar_historico(editais_vistos)
