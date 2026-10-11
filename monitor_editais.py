@@ -1,138 +1,108 @@
-import os
 import json
-import logging
+import os
 import requests
 from bs4 import BeautifulSoup
 
-# Configuração de Logs
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+# Arquivo JSON que guarda o histórico de editais já notificados
+HISTORICO_FILE = 'editais_vistos.json'
 
-# URLs e Ficheiros
-URL_EDITAIS = "https://www.metropoledigital.ufrn.br/portal/editais"
-HISTORICO_FILE = "editais_vistos.json"
-
-# Credenciais lidas de Variáveis de Ambiente
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-
-def carregar_historico() -> set:
-    """Carregamento do histórico de editais vistos."""
+def carregar_historico():
+    """Carrega a lista de editais já vistos do arquivo JSON."""
     if os.path.exists(HISTORICO_FILE):
         try:
-            with open(HISTORICO_FILE, "r", encoding="utf-8") as f:
+            with open(HISTORICO_FILE, 'r', encoding='utf-8') as f:
                 return set(json.load(f))
         except Exception as e:
-            logging.error(f"Erro ao carregar histórico: {e}")
+            print(f"Erro ao carregar histórico: {e}")
             return set()
     return set()
 
-
-def salvar_historico(historico: set):
-    """Guarda a lista atualizada de editais no ficheiro JSON."""
+def salvar_historico(historico):
+    """Salva a lista atualizada de editais vistos no JSON."""
     try:
-        with open(HISTORICO_FILE, "w", encoding="utf-8") as f:
+        with open(HISTORICO_FILE, 'w', encoding='utf-8') as f:
             json.dump(list(historico), f, ensure_ascii=False, indent=2)
-        logging.info("Histórico atualizado com sucesso.")
     except Exception as e:
-        logging.error(f"Erro ao salvar histórico: {e}")
+        print(f"Erro ao salvar histórico: {e}")
 
+def enviar_telegram(mensagem):
+    """Envia uma mensagem individual para o bot do Telegram."""
+    token = os.environ.get('TELEGRAM_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
 
-def enviar_notificacao_telegram(mensagem: str):
-    """Envia a mensagem de alerta para o Telegram via Bot API."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID não definidos nas variáveis de ambiente.")
+    if not token or not chat_id:
+        print("Erro: TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID não configurados.")
         return
 
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mensagem,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False
+        'chat_id': chat_id,
+        'text': mensagem,
+        'parse_mode': 'Markdown'
     }
 
     try:
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        response.raise_for_status()
-        logging.info("Notificação enviada com sucesso para o Telegram!")
+        res = requests.post(url, data=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"Erro ao enviar para o Telegram: {res.text}")
     except Exception as e:
-        logging.error(f"Erro ao enviar mensagem no Telegram: {e}")
+        print(f"Falha na conexão com o Telegram: {e}")
 
-
-def raspar_editais() -> list:
-    """Acessa a página do IMD e extrai o texto das chamadas/editais."""
+def monitorar():
+    editais_vistos = carregar_historico()
+    url_portal = 'https://portal.imd.ufrn.br/portal/editais' # URL dos editais do IMD
+    
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
     try:
-        response = requests.get(URL_EDITAIS, headers=headers, timeout=15)
+        response = requests.get(url_portal, headers=headers, timeout=15)
         response.raise_for_status()
-    except requests.RequestException as e:
-        logging.error(f"Erro ao aceder {URL_EDITAIS}: {e}")
-        return []
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    editais_encontrados = []
-
-    for item in soup.find_all(class_=lambda x: x and any(c in x.lower() for c in ['edital', 'card', 'item', 'box'])):
-        texto = " ".join(item.get_text(separator=" ", strip=True).split())
-        if texto and len(texto) > 15:
-            editais_encontrados.append(texto)
-
-    if not editais_encontrados:
-        for tag in soup.find_all(['div', 'a']):
-            txt = " ".join(tag.get_text(strip=True).split())
-            if any(termo in txt for termo in ["Processo Seletivo", "PROCESSO SELETI", "Bolsista", "SELEÇÃO SIMPLIFICADA"]):
-                if len(txt) > 20 and txt not in editais_encontrados:
-                    editais_encontrados.append(txt)
-
-    return editais_encontrados
-
-
-def executar_verificacao():
-    """Fluxo principal do monitoramento."""
-    logging.info("Iniciando verificação do portal de editais...")
-    editais_atuais = raspar_editais()
-
-    if not editais_atuais:
-        logging.warning("Nenhum edital localizado.")
+    except Exception as e:
+        print(f"Erro ao acessar o portal do IMD: {e}")
         return
 
-    historico = carregar_historico()
-    novos_editais = []
+    soup = BeautifulSoup(response.text, 'html.parser')
 
-    for edital in editais_atuais:
-        if edital not in historico:
-            historico.add(edital)
-            novos_editais.append(edital)
+    # Busca as linhas/blocos de editais na página
+    # Ajusta-se às estruturas comuns de tabelas e listas do portal
+    blocos_editais = soup.find_all(['tr', 'div', 'li'], class_=lambda c: c and any(x in c.lower() for x in ['edital', 'linha', 'item', 'card']))
 
-    if not os.path.exists(HISTORICO_FILE):
-        salvar_historico(historico)
-        logging.info("Primeira execução: estado atual registado em JSON sem disparar notificações.")
-        return
+    # Caso não encontre por classe, busca linhas de tabela genéricas (tr) com links/conteúdo
+    if not blocos_editais:
+        blocos_editais = soup.find_all('tr')
 
-    if novos_editais:
-        logging.info(f"{len(novos_editais)} novo(s) edital(is) detectado(s)!")
-        salvar_historico(historico)
-        for edital in novos_editais[:5]:
-            msg = (
-                f"🚨 *NOVO EDITAL OU ATUALIZAÇÃO DETECTADA!*\n\n"
-                f"{edital}\n\n"
-                f"🔗 [Acessar Portal de Editais IMD]({URL_EDITAIS})"
-            )
-            enviar_notificacao_telegram(msg)
+    novos_editais_count = 0
+
+    for bloco in blocos_editais:
+        # Extrai o texto limpo do edital
+        texto_limpo = " ".join(bloco.get_text().split())
+
+        # Ignora blocos vazios, cabeçalhos curtos ou sem informação útil
+        if len(texto_limpo) < 20 or "Inscrições" not in texto_limpo and "Processo" not in texto_limpo:
+            continue
+
+        # Identificador único para a comparação
+        id_edital = texto_limpo
+
+        # Se for um edital novo
+        if id_edital not in editais_vistos:
+            novos_editais_count += 1
+            editais_vistos.add(id_edital)
+
+            # Formata a mensagem limpa individual
+            mensagem = f"🚨 *NOVO EDITAL OU ATUALIZAÇÃO DETECTADA!*\n\n{texto_limpo}"
+            
+            # Envia a notificação imediatamente para este edital
+            enviar_telegram(mensagem)
+            print(f"Novo edital enviado: {texto_limpo[:60]}...")
+
+    if novos_editais_count > 0:
+        salvar_historico(editais_vistos)
+        print(f"Sucesso: {novos_editais_count} novo(s) edital(is) notificado(s).")
     else:
-        logging.info("Nenhuma alteração detectada nos editais.")
+        print("Nenhum edital novo detectado nesta verificação.")
 
-
-if __name__ == "__main__":
-    executar_verificacao()
+if __name__ == '__main__':
+    monitorar()
